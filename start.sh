@@ -12,57 +12,74 @@ ok()   { echo -e "${GREEN}✅ $*${NC}"; }
 warn() { echo -e "${YELLOW}⚠️  $*${NC}"; }
 err()  { echo -e "${RED}❌ $*${NC}"; }
 
-# ساخت پوشه‌های دیتابیس
 mkdir -p "${DATA_DIR:-/app/data/9router}"
 mkdir -p "$(dirname "${DB_PATH:-/app/data/panel.db}")"
 
 cleanup() {
-    log "Shutting down..."
+    log "Shutting down all services..."
     pkill -TERM -f "node.*9router" 2>/dev/null || true
+    pkill -TERM -f "mtg" 2>/dev/null || true
     pkill -TERM -f "server.js" 2>/dev/null || true
     exit 0
 }
 trap cleanup SIGTERM SIGINT
 
-log "==============================================="
-log "  LM-Panel + 9Router — Starting up"
-log "==============================================="
-
-# پاکسازی پروسه‌های قبلی
 pkill -9 -f "9router" 2>/dev/null || true
 pkill -9 -f "node.*20128" 2>/dev/null || true
+pkill -9 -f "mtg" 2>/dev/null || true
 sleep 1
 
-# پسورد و سکرت روتر
+# ---------- متغیرهای 9Router ----------
 if [ -z "${INITIAL_PASSWORD:-}" ]; then
     INITIAL_PASSWORD="$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)"
-    warn "INITIAL_PASSWORD not set — generated: ${INITIAL_PASSWORD}"
 fi
 export INITIAL_PASSWORD
 
 if [ -z "${JWT_SECRET:-}" ]; then
     JWT_SECRET="$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 32)"
-    warn "JWT_SECRET not set — generated automatically."
 fi
 export JWT_SECRET
 
 PORT_9ROUTER="${PORT_9ROUTER:-20128}"
-export PORT_9ROUTER
+PORT_MTPROTO="${PORT_MTPROTO:-3128}"
+
+# ---------- ساخت سکرت ضد فیلتر FakeTLS تلگرام ----------
+# استفاده از دامین معتبر کلودفلر برای دور زدن فیلترینگ
+TLS_DOMAIN="cloudflare.com"
+if [ -z "${MTPROTO_SECRET:-}" ]; then
+    MTPROTO_SECRET=$(mtg generate-secret --hex "$TLS_DOMAIN")
+fi
+
+# ---------- استارت پروکسی تلگرام (MTG) ----------
+log "Starting Telegram MTProto Proxy on port ${PORT_MTPROTO}..."
+mtg run -b "0.0.0.0:${PORT_MTPROTO}" "$MTPROTO_SECRET" > /tmp/mtg.log 2>&1 &
+MTG_PID=$!
+
+# بررسی وضعیت TCP Proxy ریلوِی برای لینک تلگرام
+TCP_HOST="${RAILWAY_TCP_PROXY_DOMAIN:-}"
+TCP_PORT="${RAILWAY_TCP_PROXY_PORT:-}"
 
 echo ""
 echo "=================================================="
-echo "  🔑 9Router Dashboard"
-echo "  Password: ${INITIAL_PASSWORD}"
-echo "  JWT Secret: ${JWT_SECRET}"
-echo "  Port:     ${PORT_9ROUTER}"
+echo "  🚀 ALL-IN-ONE SERVICES READY"
 echo "=================================================="
-echo "  🖥️  Panel (LM-Panel)"
-echo "  Port:     ${PORT:-8080}"
-echo "  DB:       ${DB_PATH:-/app/data/panel.db}"
+echo "  🖥️  Panel Port:     ${PORT:-8080}"
+echo "  🔑 9Router Port:   ${PORT_9ROUTER}"
+echo "     9Router Pass:   ${INITIAL_PASSWORD}"
+echo "--------------------------------------------------"
+if [ -n "$TCP_HOST" ] && [ -n "$TCP_PORT" ]; then
+    echo "  ✈️ TELEGRAM PROXY LINK:"
+    echo "  tg://proxy?server=${TCP_HOST}&port=${TCP_PORT}&secret=${MTPROTO_SECRET}"
+    echo "  https://t.me/proxy?server=${TCP_HOST}&port=${TCP_PORT}&secret=${MTPROTO_SECRET}"
+else
+    echo "  ✈️ Telegram Proxy internal: 0.0.0.0:${PORT_MTPROTO}"
+    echo "  ⚠️ TCP Proxy is not enabled yet in Railway Settings!"
+    echo "  Secret: ${MTPROTO_SECRET}"
+fi
 echo "=================================================="
 echo ""
 
-# پیدا کردن مسیر واقعی سرور 9router در پکیج گلوبال npm
+# ---------- استارت سرور مستقل 9Router ----------
 NINE_DIR="$(npm root -g)/9router/app"
 if [ ! -d "$NINE_DIR" ]; then
     NINE_DIR="/usr/local/lib/node_modules/9router/app"
@@ -75,9 +92,6 @@ elif [ -f "$NINE_DIR/server.js" ]; then
     RUN_SCRIPT="server.js"
 fi
 
-log "Targeting 9Router server at: ${NINE_DIR}/${RUN_SCRIPT}"
-
-# اجرای مستقیم سرور نود (بدون TUI و بدون پرسیدن منو)
 (
     cd "$NINE_DIR" || exit 1
     export PORT="$PORT_9ROUTER"
@@ -90,29 +104,7 @@ log "Targeting 9Router server at: ${NINE_DIR}/${RUN_SCRIPT}"
     exec node "$RUN_SCRIPT"
 ) > /tmp/9router.log 2>&1 &
 
-NINE_PID=$!
-log "9Router process spawned with PID ${NINE_PID}"
-
-# بررسی واقعی باز شدن پورت با تست شبکه (تا حداکثر ۱۵ ثانیه)
-log "Waiting for 9Router port ${PORT_9ROUTER} to respond..."
-READY=false
-for i in $(seq 1 15); do
-    if curl -s -m 1 "http://127.0.0.1:${PORT_9ROUTER}/" > /dev/null 2>&1 || \
-       curl -s -m 1 "http://127.0.0.1:${PORT_9ROUTER}/login" > /dev/null 2>&1; then
-        READY=true
-        break
-    fi
-    sleep 1
-done
-
-if [ "$READY" = true ]; then
-    ok "9Router is UP and actively listening on port ${PORT_9ROUTER}!"
-else
-    warn "9Router health-check pending. Current logs:"
-    cat /tmp/9router.log | tail -n 25 || true
-fi
-
-# اجرای پنل اصلی
+# ---------- استارت پنل اصلی ----------
 log "Starting LM-Panel on port ${PORT:-8080}..."
 cd /app || exit 1
 exec node server.js
