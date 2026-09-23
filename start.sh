@@ -1,39 +1,109 @@
 #!/bin/bash
-set -e
+# ============================================================
+#  Startup script: runs 9Router (background) + Panel (foreground)
+# ============================================================
+set -uo pipefail
 
-echo "=== [Startup] Initializing services ==="
+# ---------- Colors for logs ----------
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
 
-# ---------- 1. کشتن پروسه‌های قبلی (جلوگیری از EADDRINUSE) ----------
+log()  { echo -e "${BLUE}[$(date +%H:%M:%S)]${NC} $*"; }
+ok()   { echo -e "${GREEN}✅ $*${NC}"; }
+warn() { echo -e "${YELLOW}⚠️  $*${NC}"; }
+err()  { echo -e "${RED}❌ $*${NC}"; }
+
+# ---------- Ensure data dirs exist ----------
+mkdir -p "${DATA_DIR:-/app/data/9router}"
+mkdir -p "$(dirname "${DB_PATH:-/app/data/panel.db}")"
+
+# ---------- Cleanup any stale processes ----------
+cleanup() {
+    log "Shutting down..."
+    pkill -TERM -f "9router" 2>/dev/null || true
+    sleep 1
+    pkill -KILL -f "9router" 2>/dev/null || true
+    exit 0
+}
+trap cleanup SIGTERM SIGINT
+
+log "==============================================="
+log "  LM-Panel + 9Router — Starting up"
+log "==============================================="
+
+# ---------- Kill any leftover processes ----------
 pkill -9 -f "9router" 2>/dev/null || true
-pkill -9 -f "node server.js" 2>/dev/null || true
-sleep 2
+sleep 1
 
-# ---------- 2. خواندن یا تولید رمز 9Router ----------
-# اگر INITIAL_PASSWORD در Railway Variables تنظیم نشده باشد، یک رمز تصادفی می‌سازیم
-if [ -z "$INITIAL_PASSWORD" ]; then
-  export INITIAL_PASSWORD=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 20)
-  echo "⚠️  INITIAL_PASSWORD not set. Generated random password: $INITIAL_PASSWORD"
+# ---------- Resolve / generate 9Router password ----------
+if [ -z "${INITIAL_PASSWORD:-}" ]; then
+    INITIAL_PASSWORD="$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)"
+    warn "INITIAL_PASSWORD not set — generated a random one."
+fi
+export INITIAL_PASSWORD
+
+# ---------- Show credentials in Deploy Logs ----------
+echo ""
+echo "=================================================="
+echo "  🔑 9Router Dashboard"
+echo "  URL:      (via reverse proxy domain)"
+echo "  Password: ${INITIAL_PASSWORD}"
+echo "  Internal: http://0.0.0.0:${PORT_9ROUTER:-20128}"
+echo "=================================================="
+echo ""
+echo "  🖥️  Panel (LM-Panel)"
+echo "  Port:     ${PORT:-3000}"
+echo "  DB:       ${DB_PATH:-/app/data/panel.db}"
+echo "=================================================="
+echo ""
+
+# ---------- Start 9Router in background ----------
+log "Starting 9Router on port ${PORT_9ROUTER:-20128}..."
+PORT="${PORT_9ROUTER:-20128}" \
+HOSTNAME="0.0.0.0" \
+DATA_DIR="${DATA_DIR:-/app/data/9router}" \
+INITIAL_PASSWORD="${INITIAL_PASSWORD}" \
+nohup 9router --host 0.0.0.0 --port "${PORT_9ROUTER:-20128}" \
+    > /tmp/9router.log 2>&1 &
+
+NINE_PID=$!
+echo "${NINE_PID}" > /tmp/9router.pid
+log "9Router started with PID ${NINE_PID}"
+
+# ---------- Watchdog for 9Router (restart if it dies) ----------
+(
+    while true; do
+        sleep 30
+        if ! kill -0 "${NINE_PID}" 2>/dev/null; then
+            err "9Router died. Restarting..."
+            PORT="${PORT_9ROUTER:-20128}" \
+            HOSTNAME="0.0.0.0" \
+            DATA_DIR="${DATA_DIR:-/app/data/9router}" \
+            INITIAL_PASSWORD="${INITIAL_PASSWORD}" \
+            nohup 9router --host 0.0.0.0 --port "${PORT_9ROUTER:-20128}" \
+                >> /tmp/9router.log 2>&1 &
+            NINE_PID=$!
+            echo "${NINE_PID}" > /tmp/9router.pid
+            log "9Router restarted with PID ${NINE_PID}"
+        fi
+    done
+) &
+WATCHDOG_PID=$!
+
+# ---------- Wait a moment for 9Router to boot ----------
+sleep 3
+if kill -0 "${NINE_PID}" 2>/dev/null; then
+    ok "9Router is running."
+    log "Last lines from 9Router log:"
+    tail -n 10 /tmp/9router.log || true
 else
-  echo "✅ INITIAL_PASSWORD is set from Railway Variables."
+    err "9Router failed to start! Check /tmp/9router.log"
+    tail -n 30 /tmp/9router.log || true
 fi
 
-# ---------- 3. نمایش رمز در لاگ (برای دیدن در Deploy Logs) ----------
-echo "========================================="
-echo "🔑 9Router Dashboard Password: $INITIAL_PASSWORD"
-echo "🌐 9Router internal port: ${PORT_9ROUTER:-20128}"
-echo "========================================="
-
-# ---------- 4. اجرای 9Router در پس‌زمینه ----------
-echo "Starting 9Router on port ${PORT_9ROUTER:-20128}..."
-# استفاده از PORT_9ROUTER برای جلوگیری از تداخل با $PORT اصلی Railway
-PORT=${PORT_9ROUTER:-20128} \
-HOSTNAME=0.0.0.0 \
-DATA_DIR=${DATA_DIR:-/app/data/9router} \
-INITIAL_PASSWORD="$INITIAL_PASSWORD" \
-nohup 9router --host 0.0.0.0 --port ${PORT_9ROUTER:-20128} --no-browser --skip-update \
-  > /tmp/9router.log 2>&1 &
-
-# ---------- 5. اجرای ISSPanel در پیش‌زمینه ----------
-echo "Starting ISSPanel on port $PORT..."
-export DB_PATH=/app/data/isspanel.db
+# ---------- Start Panel in foreground (PID 1 of app) ----------
+log "Starting LM-Panel on port ${PORT:-3000}..."
 exec node server.js
