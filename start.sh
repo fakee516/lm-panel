@@ -12,7 +12,11 @@ ok()   { echo -e "${GREEN}✅ $*${NC}"; }
 warn() { echo -e "${YELLOW}⚠️  $*${NC}"; }
 err()  { echo -e "${RED}❌ $*${NC}"; }
 
-# ساخت پوشه‌های دیتابیس
+# پورت‌های اختصاصی ثابت - هیچ سرویسی روی پورت دیگری نمی‌افتد
+PANEL_PORT=8080
+ROUTER_PORT=20128
+TG_PORT=3128
+
 mkdir -p "${DATA_DIR:-/app/data/9router}"
 mkdir -p "$(dirname "${DB_PATH:-/app/data/panel.db}")"
 
@@ -25,32 +29,29 @@ cleanup() {
 }
 trap cleanup SIGTERM SIGINT
 
-# پاکسازی پروسه‌های قدیمی
+# کشتن هر پروسه قبلی برای جلوگیری از EADDRINUSE
 pkill -9 -f "9router" 2>/dev/null || true
-pkill -9 -f "node.*20128" 2>/dev/null || true
 pkill -9 -f "mtg" 2>/dev/null || true
+pkill -9 -f "node" 2>/dev/null || true
 sleep 1
 
-PORT_9ROUTER="${PORT_9ROUTER:-20128}"
-PORT_MTPROTO="${PORT_MTPROTO:-3128}"
-
-# سکرت تلگرام (پیش‌فرض کلودفلر)
+# سکرت تلگرام
 MTPROTO_SECRET="${MTPROTO_SECRET:-ee1603010200010001fc030386e24c3add636c6f7564666c6172652e636f6d}"
 
-# ---------- ۱. استارت پروکسی تلگرام ----------
-log "Starting Telegram MTProto Proxy on port ${PORT_MTPROTO}..."
-nohup mtg simple-run --prefer-ip=prefer-ipv4 "0.0.0.0:${PORT_MTPROTO}" "$MTPROTO_SECRET" > /tmp/mtg.log 2>&1 &
+# ---------- ۱. استارت پروکسی تلگرام روی 3128 ----------
+log "Starting Telegram MTProto Proxy on port ${TG_PORT}..."
+nohup mtg simple-run --prefer-ip=prefer-ipv4 "0.0.0.0:${TG_PORT}" "$MTPROTO_SECRET" > /tmp/mtg.log 2>&1 &
 
-TCP_HOST="${RAILWAY_TCP_PROXY_DOMAIN:-roundhouse.proxy.rlwy.net}"
-TCP_PORT="${RAILWAY_TCP_PROXY_PORT:-13448}"
+TCP_HOST="${RAILWAY_TCP_PROXY_DOMAIN:-trolley.proxy.rlwy.net}"
+TCP_PORT="${RAILWAY_TCP_PROXY_PORT:-32488}"
 
 echo ""
 echo "=================================================="
 echo "  🚀 ALL-IN-ONE SERVICES DASHBOARD"
 echo "=================================================="
-echo "  🖥️  Panel Port:       ${PORT:-8080}"
-echo "  🔑 9Router Port:     ${PORT_9ROUTER}"
-echo "     9Router Pass:     ${INITIAL_PASSWORD:-Admin9Router@2026!}"
+echo "  🖥️  Panel Port:       ${PANEL_PORT}"
+echo "  🔑 9Router Port:     ${ROUTER_PORT}"
+echo "     9Router Pass:     ${INITIAL_PASSWORD:-75757575}"
 echo "--------------------------------------------------"
 echo "  ✈️  TELEGRAM PROXY:"
 echo "  tg://proxy?server=${TCP_HOST}&port=${TCP_PORT}&secret=${MTPROTO_SECRET}"
@@ -58,7 +59,7 @@ echo "  https://t.me/proxy?server=${TCP_HOST}&port=${TCP_PORT}&secret=${MTPROTO_
 echo "=================================================="
 echo ""
 
-# ---------- ۲. استارت سرور مستقل روتر ۹ ----------
+# ---------- ۲. استارت سرور روتر ۹ روی 20128 ----------
 NINE_DIR="$(npm root -g)/9router/app"
 if [ ! -d "$NINE_DIR" ]; then
     NINE_DIR="/usr/local/lib/node_modules/9router/app"
@@ -73,17 +74,18 @@ fi
 
 (
     cd "$NINE_DIR" || exit 1
-    export PORT="$PORT_9ROUTER"
+    export PORT="$ROUTER_PORT"
     export HOSTNAME="0.0.0.0"
     export DATA_DIR="${DATA_DIR:-/app/data/9router}"
-    export INITIAL_PASSWORD="${INITIAL_PASSWORD:-Admin9Router@2026!}"
+    export INITIAL_PASSWORD="${INITIAL_PASSWORD:-75757575}"
     export JWT_SECRET="${JWT_SECRET:-f7b2a9e4d6c14829a3e508b17c2f6d90e8a71b3c5e4d2a6f8b0c9e7d5a3f1b2c}"
     export NODE_ENV="production"
     export NEXT_TELEMETRY_DISABLED=1
     exec node "$RUN_SCRIPT"
 ) > /tmp/9router.log 2>&1 &
 
-# ---------- ۳. استارت پنل اصلی ----------
-log "Starting LM-Panel on port ${PORT:-8080}..."
+# ---------- ۳. استارت پنل اصلی روی 8080 (ثابت) ----------
+log "Starting LM-Panel on dedicated port ${PANEL_PORT}..."
 cd /app || exit 1
+export PORT="$PANEL_PORT"
 exec node server.js
