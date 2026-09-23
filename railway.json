@@ -7,8 +7,13 @@
   "deploy": {
     "startCommand": "/app/start.sh",
     "healthcheckPath": "/",
-    "healthcheckTimeout": 100,
+    "healthcheckTimeout": 120,
     "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 10
+    "restartPolicyMaxRetries": 10,
+    "ports": {
+      "panel": 8080,
+      "xray": 10086,
+      "9router": 20128
+    }
   }
 }
